@@ -1,0 +1,3 @@
+LOADMEM default.mem
+openio "C:\Program Files (x86)\Freescale\CWS12v5.2\prog\Pinconn.io"
+openio Signal

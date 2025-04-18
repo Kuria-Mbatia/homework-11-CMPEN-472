@@ -1,0 +1,68 @@
+# Project Intelligence and Rules
+
+## MC9S12C128 ADC Integration Rules
+
+### Register Naming and Access
+- ADC registers should be referenced with symbolic names (ATDCTL2, etc.)
+- Use full register names in comments for clarity
+- Configure registers using binary notation (%10101010) for bit-level clarity
+- Follow the datasheet bit definitions precisely
+
+### Timing Considerations
+- Timer OC5 must be set for exactly 125μs intervals (8kHz)
+- ADC conversion must be started immediately after reading previous result
+- Terminal output must be completed within timing window
+- Interrupt latency must be considered in timing calculations
+
+### Command Parse Pattern
+- Follow existing command parse pattern in main.asm
+- Compare first character, then subsequent characters
+- Validate full command before executing
+- Return error message for invalid formats
+
+### Output Formatting Standards
+- ADC values must be displayed in decimal format (0-255)
+- Each value should be followed by a space or newline
+- Output routine must be optimized for speed
+- Consider buffer strategy for high-speed output
+
+### Variable Naming
+- Use ADC_prefix for ADC-related variables
+- Boolean flags should be clear in their meaning (ADC_ACTIVE, not FLAG1)
+- Counter variables should indicate purpose (ADC_COUNTER, not CNT)
+- Constants should be descriptive (ADC_SAMPLE_COUNT, not NUM)
+
+### Interrupt Handling
+- Save all affected registers at start of ISR
+- Restore all registers before returning
+- Keep ISRs as short as possible
+- Use flags for communication between ISRs and main code
+
+### Binary-to-Decimal Conversion
+- Use division method for 8-bit to decimal conversion
+- Extract digits from most to least significant
+- Convert binary digits to ASCII by adding $30
+- Optimize for speed since conversion happens at 8kHz
+
+### Code Organization
+- Group ADC initialization with other initialization code
+- Keep ADC-related subroutines together
+- Add clear section headers in comments
+- Document critical timing requirements in comments
+
+### Critical Paths
+- Timer OC5 ISR → Read ADC → Output → Start ADC → Update counter
+- Command parser → ADC command handler → Enable Timer OC5
+- ADC completion → Disable Timer OC5 → Print "Finished"
+
+### Error Prevention
+- Always check if ADC is already active before starting
+- Implement timeout detection for ADC operations
+- Verify correct ADC channel (7) is selected
+- Verify Timer OC5 is correctly configured before enabling
+
+### Testing Approach
+- Verify timing with simulator/debugger tools
+- Check signal integrity with simulated input
+- Confirm exact count of 2048 samples
+- Verify clock continues running during ADC operation 
