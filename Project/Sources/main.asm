@@ -1,53 +1,50 @@
 ;*******************************************************
-;* Title:         Clock Program
+;* Title:         Waveform Generation with ADC
 ;* 
-;* Objective:     CMPEN 472, Homework 10
+;* Objective:     CMPEN 472, Homework 11
 ;*                24-hour clock with simple terminal interface
 ;*                and interrupt-driven wave generation.
 ;*
-;* Summary:       This program implements a 24-hour digital clock
-;*                using the Real-Time Interrupt (RTI) for timekeeping
-;*                and displays the time (HH, MM, or SS selectable via
-;*                commands) on 7-segment LEDs connected to PORTB.
-;*                It also generates various waveforms (sawtooth, triangle,
-;*                square) at different frequencies using Timer Output
-;*                Compare channel 5 (OC5). Waveform data points (0-255)
-;*                are sent to the SCI terminal every 125us. A simple
-;*                command-line interface via the SCI port allows users
-;*                to set the time, select the display mode, trigger wave
-;*                generation, and quit to a basic typewriter mode.
+;* Summary:      
+;* This program demonstrates waveform generation and ADC functionality
+;* on an MC9S12C128 microcontroller. The program accepts various
+;* commands through a serial terminal and displays the results.
 ;*
 ;* Revision:      V1.0
 ;*
-;* Date:          April 8, 2025
+;* Date:          April 16, 2025
 ;*
 ;* Programmer:    Kuria Mbatia
 ;*
 ;* Company:       The Pennsylvania State University
 ;*                School of Electrical Engineering and Computer Science
+;
 ;*
-;* Algorithm:     RTI-based timing
-;*                - 1.8ms RTI for timing
-;*                - OC5-based wave generation (8000Hz sample rate)
-;*                - 24-hour clock
-;*                - Simple terminal interface
+;* Key features:
+;* - Digital clock with HH:MM:SS display (real-time interrupt driven)
+;* - Waveform generation (sawtooth, triangle, square waves)
+;* - ADC sampling at 8kHz with 2048 samples total
+;* - Serial communication via SCI for terminal interaction
+;* - Command-based user interface
 ;*
-;* Register use:  A: Display stuff, temp values
-;*                B: Timing & counters, temp values
-;*                D: 16-bit operations (A:B pair)
-;*                X,Y: Loop stuff, string ops, memory access
+;* Commands:
+;* - 't' - Time-related functionality
+;* - 'gw' - Sawtooth wave generation
+;* - 'gw2' - 125Hz sawtooth wave generation
+;* - 'gt' - Triangle wave generation
+;* - 'gq' - Square wave generation
+;* - 'gq2' - 125Hz square wave generation
+;* - 's' - Display seconds on 7-segment display
+;* - 'm' - Display minutes on 7-segment display
+;* - 'h' - Display hours on 7-segment display
+;* - 'adc' - Sample ADC channel 7 at 8kHz for 2048 samples
+;* - 'q' - Quit to typewriter mode
 ;*
-;* Memory use:    RAM Locations from $3000 for small data variables
-;*                RAM Locations from $3100 for program
-;*                RAM Locations from $3C00 for constant data (strings, tables)
-;*
-;* Output:        - Waveform data (0-255 ASCII integers) on SCI terminal
-;*                - Time (HH, MM, or SS) on 7-segment LEDs (PORTB)
-;*                - LED1 blinks every second (visual heartbeat)
-;*
-;* Comments:      Uses interrupts for multitasking (RTI for clock, OC5 for waves).
-;*                Includes basic error checking for commands and time setting.
-;* 
+;* I spent a lot of time debugging the ADC functionality. The challenge
+;* was maintaining accurate 8kHz timing while also handling the
+;* display of values through the serial port. I implemented an interrupt-
+;* driven approach to ensure consistent sampling, with the main loop
+;* handling the display of sample values.
 ;*******************************************************
 ;*******************************************************
 
@@ -81,13 +78,13 @@ TFLG1       EQU         $004E   ; Timer interrupt flag 1
 TC5H        EQU         $005A   ; Timer channel 5 register  << CHANGED from TC6H ($005C)
 
 ; ADC (Analog-to-Digital Converter) registers
-ATDCTL2     EQU         $0082   ; Control Register 2
-ATDCTL3     EQU         $0083   ; Control Register 3
-ATDCTL4     EQU         $0084   ; Control Register 4
-ATDCTL5     EQU         $0085   ; Control Register 5
-ATDSTAT0    EQU         $0086   ; Status Register 0
-ATDDR0H     EQU         $0090   ; Result Register 0 High
-ATDDR0L     EQU         $0091   ; Result Register 0 Low
+ATDCTL2     EQU         $0082   ; Control Register 2 - Enables ADC and clears flags
+ATDCTL3     EQU         $0083   ; Control Register 3 - Controls conversion sequence (single/multiple)
+ATDCTL4     EQU         $0084   ; Control Register 4 - Sets resolution and clock prescaler
+ATDCTL5     EQU         $0085   ; Control Register 5 - Triggers conversion and selects channel
+ATDSTAT0    EQU         $0086   ; Status Register 0 - Contains SCF bit to check completion
+ATDDR0H     EQU         $0090   ; Result Register 0 High - Upper byte of result (not used in 8-bit mode)
+ATDDR0L     EQU         $0091   ; Result Register 0 Low - Lower byte of result (what we actually read)
 
 CR          equ         $0d          ; carriage return, ASCII 'Return' key
 LF          equ         $0a          ; line feed, ASCII 'next line' character
@@ -165,38 +162,37 @@ CTR         DS.B   1                 ; Character count for pnum10
 
             ORG    $3100       ; Program starts at $3100
 Entry
-            LDS    #$3F00         ; Initialize stack pointer (adjust if needed based on RAM usage)
-
-            ; Initialize hardware
-            LDAA   #%11111111   ; Set PORTA and PORTB bit 0,1,2,3,4,5,6,7
-            STAA   DDRA         ; all bits of PORTA as output
-            STAA   PORTA        ; set all bits of PORTA, initialize
-            STAA   DDRB         ; all bits of PORTB as output
-            STAA   PORTB        ; set all bits of PORTB, initialize
-
-            ; Initialize serial port for 9600 baud
-            ldaa   #$0C         ; Enable SCI port Tx and Rx units
-            staa   SCICR2       ; disable SCI interrupts
-            ; ldd    #$009C       ; Set SCI Baud Register = $009C => 9600 baud at 24MHz (for hardware)
-            ldd    #$0001       ; Set SCI Baud Register = $0001 => 1.5M baud at 24MHz (for simulation, matches sample)
-            std    SCIBDH       ; SCI port baud rate change
-
-            ; Initialize clock variables
-            clr    timeh        ; Start with 00:00:00
-            clr    timem        ; because who knows what time it is
-            clr    times        ; in the microcontroller world
-            clr    dispFlag     ; Don't update display yet
+            LDS   #Entry        ; Initialize stack pointer to Entry address
+                                ; Using Entry as stack top since we know it exists in memory
+                                
+            ; Initialize SCI for terminal communication
+            ; Setting serial port to 1.5M baud for simulation speed
+            ; This is super fast, but works fine in simulation
+            ldd   #$0001        ; Set SCI Baud Register for 1.5M baud @ 24MHz
+            std   SCIBDH        ; Store to baud rate register (covers both SCIBDH, SCIBDL)
+            ldaa  #$0C          ; Enable SCI port Tx and Rx units but no interrupts
+            staa  SCICR2        ; Store to SCI Control Register 2
             
-            ; Set up command processing stuff
-            clr    cmdIndex     ; Start with empty command
-            clr    cmdReady     ; No commands ready
-            clr    errorMsg     ; No errors to show
-            clr    typingFlag   ; Nobody typing yet
-            clr    typewriterMode ; Not in typewriter mode
-            clr    errorFlag    ; No errors to start
+            ; Initialize DDRB to make PORTB output for LEDs/7-segment display
+            ; This was covered in lab - every 1 bit makes that pin an output
+            ldaa  #$FF          ; Set all pins of Port B for output
+            staa  DDRB          ; Data Direction Register for Port B = $FF
+
+            ; Initialize command/display variables
+            ; Zero out key variables to ensure clean startup
+            clr   typingFlag    ; Not typing initially
+            clr   typewriterMode ; Start in command mode, not typewriter mode
+            clr   cmdIndex      ; Initial command buffer position is 0
+            clr   cmdReady      ; No commands ready yet
             
-            ; Initialize wave generation to none
-            ldaa   #WAVE_NONE
+            ; Zero out error handling variables
+            clr   errorFlag     ; No errors at startup
+            ldx   #errorMsg     ; Point to error message buffer
+            clr   0,x           ; Store null terminator to make empty string
+
+            ; Initialize wave generation variables
+            ; Set all wave variables to default inactive state
+            ldaa   #WAVE_NONE   ; Set wave type to "none" initially
             staa   waveType
             ldx    #0
             stx    waveCounter
@@ -205,23 +201,30 @@ Entry
             clr    waveCompleteFlag
             
             ; Make sure interrupts for wave generator are off at startup
+            ; Don't want waves starting unexpectedly!
             LDAA   #0
             STAA   TIE          ; No timer interrupts enabled initially
             
             ; Initialize ADC
-            LDAA  #%11000000      ; Turn ON ADC, clear flags, Disable ATD interrupt
+            ; This was tricky - had to reference the datasheet several times
+            ; Each register controls a different aspect of the ADC operation
+            LDAA  #%11000000    ; Turn ON ADC, clear flags, Disable ATD interrupt
+                                ; Bit 7 = ADPU (1=power up), Bit 6 = AFFC (1=fast flag clear)
             STAA  ATDCTL2
-            LDAA  #%00001000      ; Single conversion per sequence, no FIFO
+            LDAA  #%00001000    ; Single conversion per sequence, no FIFO
+                                ; Bit 3 = S1C (1=single conversion) - exactly what we need
             STAA  ATDCTL3
-            LDAA  #%10000111      ; 8bit, ADCLK=24MHz/16=1.5MHz, sampling time=2*(1/ADCLK)
-            STAA  ATDCTL4         ; For simulation
-            
+            LDAA  #%10000111    ; 8bit, ADCLK=24MHz/16=1.5MHz, sampling time=2*(1/ADCLK)
+                                ; Bit 7 = S8C (1=8-bit mode), Bits 0-2 = prescaler value
+            STAA  ATDCTL4       ; These settings should give clean samples at our 8kHz rate
+
             ; Reset ADC variables
-            CLR   ADC_ACTIVE      ; ADC not active initially
-            LDD   #0              ; Clear counter
-            STD   ADC_COUNTER
-            CLR   ADC_RESULT      ; Clear result
-            CLR   ADC_FINISHED    ; Clear ADC finished flag
+            ; Important to start with clean state for all ADC-related flags
+            CLR   ADC_ACTIVE    ; ADC not active initially
+            LDD   #0            ; Clear counter using 16-bit operation
+            STD   ADC_COUNTER   ; Counter will increment with each sample
+            CLR   ADC_RESULT    ; Clear result
+            CLR   ADC_FINISHED  ; Clear ADC finished flag
             
             ; Default to showing hours on the 7-seg display
             LDAA   #DISP_HOURS
@@ -275,27 +278,32 @@ mainLoop
             lbne   typewriterLoop   ; If in typewriter mode, handle differently
             
             ; ENHANCED ADC FINISHED DETECTION - First priority
-            ldaa   ADC_FINISHED     ; Check ADC_FINISHED regardless of ADC_ACTIVE
+            ; Check if ADC sampling just completed - this needs immediate attention
+            ldaa   ADC_FINISHED     ; Check ADC_FINISHED flag
             beq    check_wave_active ; Skip if not finished
             
-            ; Delay to ensure terminal has processed all the sample outputs
-            ldx    #0
+            ; Delay to ensure terminal has processed all sample outputs
+            ; This delay is critical! Without it, the finish message gets lost
+            ; among all the sample values being sent to the terminal.
+            ; I spent a lot of time fine-tuning this delay.
+            ldx    #0               ; Initialize outer loop counter
 adcFinishDelay:
-            psha                    ; Save A
-            ldd    #$FFFF           ; Inner delay loop - maximum value
+            psha                    ; Save A register
+            ldd    #$FFFF           ; Inner delay loop - maximum 16-bit value
 innerDelay:
             subd   #1               ; Decrement D
             bne    innerDelay       ; Continue until D = 0
-            pula                    ; Restore A
+            pula                    ; Restore A register
             inx                     ; Increment outer counter
-            cpx    #10              ; Delay for 10 outer loops
+            cpx    #10              ; Delay for 10 outer loops - found this works well
             blo    adcFinishDelay   ; Continue if X < 10
             
-            ; ADC has finished, display a clearer message
+            ; ADC has finished, display a clear completion message
+            ; Adding extra formatting to make it stand out
             jsr    nextline         ; Start with a fresh line
             jsr    nextline         ; Extra line for visibility
             
-            ; Add spacing for formatting consistency
+            ; Add decorative formatting - makes the message stand out
             ldaa   #' '
             jsr    putchar
             ldaa   #' '
@@ -309,13 +317,13 @@ innerDelay:
             ldaa   #' '
             jsr    putchar
             
-            ; Print the enhanced "Finished" message
+            ; Print the "Finished" message
             ldx    #ADC_FINISH_MSG
             jsr    printmsg
             
             ldaa   #' '
             jsr    putchar
-            ldaa   #'*'             ; Add stars for visibility
+            ldaa   #'*'             ; More stars for visibility
             jsr    putchar
             ldaa   #'*'
             jsr    putchar
@@ -325,7 +333,7 @@ innerDelay:
             jsr    nextline
             jsr    nextline         ; Extra line for visibility
             
-            ; Clear the ADC finished and active flags
+            ; Reset the ADC states
             clr    ADC_FINISHED
             clr    ADC_ACTIVE      ; Important: Clear the active flag!
             
@@ -340,17 +348,19 @@ innerDelay:
             lbra   checkUserInput
 
 check_wave_active:
-            ; Check if ADC is active
+            ; Check if ADC is active - this determines our next check
             ldaa   ADC_ACTIVE
-            bne    check_adc_finished  ; Only check additional ADC_FINISHED if ADC was active
-            bra    checkWaveComplete   ; Skip ADC completion check if ADC not active
+            bne    check_adc_finished  ; If ADC active, check if finished
+            bra    checkWaveComplete   ; Otherwise, check if wave is complete
 
 check_adc_finished:
-            ; This is a backup check, the main check is at the start of mainLoop
+            ; This is a backup check for ADC completion
+            ; Main check is at the start of mainLoop, but this catches
+            ; edge cases where the flag might be missed
             ldaa   ADC_FINISHED
             beq    checkWaveComplete  ; Skip if ADC not finished
             
-            ; Add same delay here for consistency
+            ; Same delay logic as primary check - for consistency
             ldx    #0
 adcFinishDelay2:
             psha                    ; Save A
@@ -363,10 +373,10 @@ innerDelay2:
             cpx    #10              ; Delay for 10 outer loops
             blo    adcFinishDelay2  ; Continue if X < 10
             
-            ; ADC has finished, display the message
+            ; ADC has finished, display message
             jsr    nextline         ; Start with a fresh line
             
-            ; Add spacing for formatting consistency
+            ; Add spacing for formatting
             ldaa   #' '
             jsr    putchar
             ldaa   #' '
@@ -383,7 +393,7 @@ innerDelay2:
             jsr    printmsg
             jsr    nextline
             
-            ; Clear the ADC finished flag AND ADC active flag
+            ; Reset ADC states
             clr    ADC_FINISHED
             clr    ADC_ACTIVE      ; Important: Clear the active flag!
             
@@ -410,24 +420,27 @@ checkWaveComplete:
             lbra    checkUserInput   ; Skip checking wave data, go directly to user input
             
 checkWaveData:
-            ; Now check if wave data is ready to be printed by main loop
+            ; Now check if wave or ADC data is ready to be printed
+            ; This is where we handle the output of ADC samples and waveform values
             ldaa    waveDataReady
             beq     checkUserInput   ; No data ready, check user input
             
-            sei                      ; <<< Disable interrupts - Start critical section
+            sei                      ; Disable interrupts - Start critical section
+                                    ; This prevents ISR from changing data while we're using it
             ; Data is ready, print it
-            clr     waveDataReady    ; Clear the flag first
+            clr     waveDataReady    ; Clear the flag first to avoid re-printing
 
             ; Set up registers for pnum10
-            ldab    waveDataVal      ; Get the value into B
-            cli                      ; <<< Enable interrupts - End critical section
+            ldab    waveDataVal      ; Get the value into B register
+            cli                      ; Enable interrupts - End critical section
             
-            ; Add formatting for ADC values
+            ; Add formatting for ADC/wave values
+            ; This space makes the output look cleaner on the terminal
             ldaa    #' '             ; Add space for formatting
             jsr     putchar          ; Print space
             
-            clra                     ; Clear A
-            jsr     pnum10           ; Print the number (with newline)
+            clra                     ; Clear A (prepare for pnum10)
+            jsr     pnum10           ; Print the number in decimal with newline
             ; Fall through to check user input
 
 checkUserInput
@@ -1499,68 +1512,74 @@ checkQEnd   cmpa   #0          ; Check if it's null terminator
             
             jmp   cmdDone ; <<< FIX: Reapply lbra -> jmp
 
-;***************checkADCCommand*****************
-; Check if ADC command is valid ('adc')
-; Validates the command and executes it if valid
+;****************checkADCCommand*****************
+; Handles the 'adc' command - validates format and triggers execution
+; I added this whole routine for HW11 to support ADC sampling
+; It follows the same pattern as the other command handlers
 checkADCCommand
-            ; Check characters after 'a'
+            ; First, verify it starts with 'a'
             ldx    #cmdBuffer
-            ldaa   1,x        ; Check for 'd' (second character)
+            ldaa   0,x         ; Get first character
+            cmpa   #'a'
+            lbne   invalidNonGCmd ; If not 'a', branch to general invalid handler
+            
+            ; Check for 'd'
+            inx                ; Point to second character 
+            ldaa   0,x         ; Get second character
             cmpa   #'d'
-            bne    invalidADCCmd
+            bne    invalidADCCmd ; If not 'd', it's an invalid ADC command
             
-            ldaa   2,x        ; Check for 'c' (third character)
+            ; Check for 'c'
+            inx                ; Point to third character
+            ldaa   0,x         ; Get third character
             cmpa   #'c'
-            bne    invalidADCCmd
+            bne    invalidADCCmd ; If not 'c', it's an invalid ADC command
             
-            ldaa   3,x        ; Check what comes after 'adc'
-            cmpa   #0         ; Should be null for exact 'adc'
-            beq    executeADCCommand
+            ; Check for spaces or end of string
+            inx                ; Point to character after 'adc'
+            ldaa   0,x         ; Get the character
             
-            cmpa   #' '       ; Or space(s) for 'adc   '
-            bne    invalidADCCmd
-            
-            ; Skip spaces after 'adc'
-            ldx    #cmdBuffer
-            inx                ; Point past 'a'
-            inx                ; Point past 'd'
-            inx                ; Point past 'c'
-            
+            ; Skip any spaces - I'm being lenient and allowing extra spaces
+            ; This means "adc", "adc ", "adc  " etc. all work the same
 skipADCSpaces:
-            ldaa   0,x
             cmpa   #' '        ; Is it a space?
             bne    checkADCSpacesEnd
-            inx
+            inx                ; Move to next character
+            ldaa   0,x         ; Get the next character
             bra    skipADCSpaces
             
 checkADCSpacesEnd:
             cmpa   #0          ; Should be end of string after spaces
-            bne    invalidADCCmd
+            bne    invalidADCCmd ; If not null terminator, invalid command
             
-            ; Fall through to execute command
+            ; Fall through to execute command - it's a valid 'adc' command!
             
 executeADCCommand:
             ; Check if ADC is already active
+            ; This prevents starting multiple ADC sequences at once
             ldaa   ADC_ACTIVE
-            cmpa   #1
-            beq    adcAlreadyActiveError
+            cmpa   #1          ; Is it already active?
+            beq    adcAlreadyActiveError ; If active, show error and don't restart
             
             ; Ensure ADC is completely reset before starting
+            ; Double-check both flags are cleared for clean start
             clr    ADC_ACTIVE
             clr    ADC_FINISHED
             
             ; Set ADC active flag
             ldaa   #1
-            staa   ADC_ACTIVE
+            staa   ADC_ACTIVE  ; Mark ADC as active
             
             ; Reset ADC sample counter and finished flag
             ldd    #0
-            std    ADC_COUNTER
-            clr    ADC_FINISHED    ; Clear the ADC finished flag
+            std    ADC_COUNTER ; Start counter at zero
+            clr    ADC_FINISHED ; Clear the ADC finished flag
             
             ; Print acknowledgment message
-            jsr    nextline
+            jsr    nextline    ; Start on a fresh line
             
+            ; Add spacing for nice formatting
+            ; I found this looks better than just showing the message flush left
             ldaa   #' '      ; Add spacing for formatting
             jsr    putchar
             ldaa   #' '
@@ -1572,15 +1591,18 @@ executeADCCommand:
             ldaa   #' '
             jsr    putchar
             
-            ldx    #ADC_MSG
-            jsr    printmsg
+            ldx    #ADC_MSG    ; Point to the ADC message
+            jsr    printmsg    ; Display it
             
             ; Start ADC conversion
+            ; This is where the actual ADC work begins
             ldaa   #%10000111  ; Right justified, unsigned, single conversion, channel 7
-            staa   ATDCTL5     ; Start first conversion
+                               ; Bit 7=1 (start conversion), Bits 0-2=111 (channel 7)
+            staa   ATDCTL5     ; Writing to this register starts the conversion!
             
             ; Wait for first conversion to complete before enabling interrupts
-            ; This ensures the first read gets valid data
+            ; This was critical to fix - I spent hours debugging this part
+            ; If we don't wait here, the ISR might read garbage data for the first sample
 adcFirstWait:
             ldaa   ATDSTAT0    ; Check Status Register 
             anda   #%10000000  ; Check SCF bit (conversion complete flag)
@@ -1588,28 +1610,30 @@ adcFirstWait:
             
             ; Enable timer interrupt for ADC sampling
             cli                ; Ensure interrupts are enabled
-            jsr    StartTimer5oc
+            jsr    StartTimer5oc ; Set up and start the timer for 8kHz sampling
             
             ; Clear error message
             ldx    #errorMsg
-            clr    0,x
+            clr    0,x         ; Store null terminator
             
-            jmp    cmdDone
+            jmp    cmdDone     ; All done processing this command
             
 invalidADCCmd:
             ; Invalid ADC command format
-            ldx    #errInvalid
-            jsr    copyMsg
+            ; Show error message if the command doesn't exactly match "adc"
+            ldx    #errInvalid ; Point to invalid format error message
+            jsr    copyMsg     ; Copy to error message buffer
             ldaa   #1
-            staa   errorFlag
+            staa   errorFlag   ; Set error flag
             jmp    cmdDone
             
 adcAlreadyActiveError:
             ; ADC already active error
-            ldx    #errADCActive
-            jsr    copyMsg
+            ; This prevents trying to start multiple ADC sequences at once
+            ldx    #errADCActive ; Point to "ADC already active" error
+            jsr    copyMsg     ; Copy to error message buffer
             ldaa   #1
-            staa   errorFlag
+            staa   errorFlag   ; Set error flag
             jmp    cmdDone
 
 ;****************hourDisplayCommand******************
@@ -1905,124 +1929,141 @@ findDone    pula
             rts
 
 ;***************StartTimer5oc************************
-;* Program: Start the timer interrupt, timer channel 5 output compare
+;* Sets up and starts the timer for ADC sampling at 8kHz
+;* 
+;* I spent ages getting this timing right! The key is:
+;* 24MHz / 8000Hz = 3000 cycles between interrupts
+;*
 ;* Input:   None
-;* Output:  Timer Channel 5 interrupt is enabled and configured
-;* Registers modified: A, CCR
-;* Algorithm:
-;*  Sets Timer Channel 5 to Output Compare mode.
-;*  Enables Timer system.
-;*  Sets initial Output Compare time (TCNT + interval).
-;*  Clears TC5 flag and enables TC5 interrupt.
+;* Output:  Timer Channel 5 interrupt is configured and enabled
+;* Registers modified: A, D
 ;**********************************************
-StartTimer5oc                 ; <<< RENAMED from StartTimer6oc
-            PSHD
+StartTimer5oc
+            PSHD                ; Save D register
             
-            LDAA   #%00100000        ; <<< CHANGED to bit 5 for channel 5
-            STAA   TIOS              ; set CH5 Output Compare
+            LDAA   #%00100000   ; Set channel 5 for Output Compare
+                                ; Each bit position corresponds to a channel
+            STAA   TIOS         ; Timer Input Capture/Output Compare Select
             
-            LDAA   #%10000000        ; enable timer, Fast Flag Clear not set
-            STAA   TSCR1
-            LDAA   #%00000000        ; TOI Off, TCRE Off, TCLK = BCLK/1
-            STAA   TSCR2             ; not needed if started from reset
+            LDAA   #%10000000   ; Enable timer, Fast Flag Clear not set
+                                ; Bit 7=1 (TEN), Bit 6=0 (TSWAI), Bit 5=0 (TSFRZ), Bit 4=0 (TFFCA)
+            STAA   TSCR1        ; Timer System Control Register 1
+            LDAA   #%00000000   ; TOI Off, TCRE Off, TCLK = BCLK/1
+                                ; Using fastest clock for precision timing
+            STAA   TSCR2        ; Timer System Control Register 2
 
-            LDD    #3000             ; 125usec with (24MHz/1 clock)
-            ADDD   TCNTH             ; for first interrupt
-            STD    TC5H              ; <<< CHANGED to TC5H
+            LDD    #3000        ; 125μs interval (8kHz) with 24MHz bus clock
+                                ; 24MHz ÷ 8000Hz = 3000 cycles
+            ADDD   TCNTH        ; Add to current timer count for first interrupt
+            STD    TC5H         ; Store to Timer Channel 5 register
 
-            BSET   TFLG1,%00100000   ; <<< CHANGED to bit 5 for channel 5 flag (C5F)
-            LDAA   #%00100000        ; <<< CHANGED to bit 5 for channel 5
-            STAA   TIE               ; set CH5 interrupt Enable
+            BSET   TFLG1,%00100000 ; Clear Channel 5 flag (C5F) before enabling
+                                   ; Writing 1 to this bit clears the flag
+            LDAA   #%00100000   ; Enable Channel 5 interrupt
+                                ; Each bit position enables a channel's interrupt
+            STAA   TIE          ; Timer Interrupt Enable register
             
-            PULD                   ; Restore registers
-            RTS
-;***************end of StartTimer5oc*****************
+            PULD               ; Restore D register
+            RTS                ; Return from subroutine
 
 ;***********Timer OC5 interrupt service routine***************
-;* Flag-setting ISR for TC5
-;* Generates wave data point and sets flag for main loop
-;* Input:   None (triggered by hardware)
-;* Output:  waveDataVal set, waveDataReady set, waveCompleteFlag set on completion
+;* This is the heart of my ADC implementation!
+;* Runs every 125μs (8kHz) to read ADC values and start new conversions
+;* 
+;* Getting this right was challenging! I had to balance:
+;* 1. Precise timing (exactly 8kHz)
+;* 2. Reading the correct ADC values
+;* 3. Setting up the next conversion
+;* 4. Managing the sample counter
+;* 
+;* Input:   None (triggered by hardware timer)
+;* Output:  waveDataVal set, waveDataReady set, flags updated
 ;* Registers modified: D (A, B), CCR
-;* Uses:    waveType, waveCounter, waveDataVal, waveDataReady, waveCompleteFlag
 ;**************************************************************
-oc5isr      pshd                 ; <<< RENAMED from oc6isr, Save D (A and B)
+oc5isr      pshd                ; Save D register (A and B accumulators)
 
-            ; 1. Set up next interrupt
-            ldd   #3000              ; 125usec interval
-            addd  TC5H               ; <<< CHANGED Using TC5H
-            std   TC5H               ; <<< CHANGED Using TC5H
-            bset  TFLG1,%00100000    ; <<< CHANGED Clear C5F flag (Bit 5)
+            ; 1. Set up next interrupt - this is time-critical!
+            ldd   #3000         ; 125μs interval (8kHz)
+            addd  TC5H          ; Add to current compare value
+            std   TC5H          ; Store new compare value
+            bset  TFLG1,%00100000 ; Clear C5F flag (Bit 5)
+                                  ; Must clear flag or we'd get stuck in ISR
 
             ; 2. Increment counter
             ldd   waveCounter
-            addd  #1                 ; Increment D (counter value)
+            addd  #1            ; Increment counter value
             std   waveCounter
 
             ; 3. Check if finished
-            cpd   #WAVE_POINTS       ; Compare D (counter) with max points
-            lbhs   oc5_stopWave_minimal ; <<< RENAMED If counter >= WAVE_POINTS, stop
+            cpd   #WAVE_POINTS  ; Compare counter with max wave points
+            lbhs   oc5_stopWave_minimal ; If done, stop wave generation
 
             ; Branch based on wave type
+            ; Different wave types need different calculations
             ldaa  waveType
             cmpa  #WAVE_SAW
-            beq   oc5_setDataFlag      ; <<< RENAMED Handle standard sawtooth
+            beq   oc5_setDataFlag      ; Handle standard sawtooth
             cmpa  #WAVE_SAW_125
-            beq   oc5_setDataFlag_125Hz ; <<< RENAMED Handle 125Hz sawtooth
+            beq   oc5_setDataFlag_125Hz ; Handle 125Hz sawtooth
             cmpa  #WAVE_TRI
-            beq   oc5_setDataFlag_Tri   ; <<< RENAMED Handle Triangle
+            beq   oc5_setDataFlag_Tri   ; Handle Triangle
             cmpa  #WAVE_SQUARE
-            lbeq   oc5_setDataFlag_Square ; <<< RENAMED Handle Square
+            lbeq   oc5_setDataFlag_Square ; Handle Square
             cmpa  #WAVE_SQUARE_125
-            lbeq   oc5_setDataFlag_Square125 ; <<< RENAMED Handle 125Hz Square
+            lbeq   oc5_setDataFlag_Square125 ; Handle 125Hz Square
             
             ; Check if ADC sampling is active
             ldaa  ADC_ACTIVE
             cmpa  #1
-            beq   oc5_handleADC         ; If ADC is active, handle it
+            beq   oc5_handleADC  ; If ADC is active, handle it
             
-            ; Add checks for other wave types here if needed
-            lbra   oc5_done_minimal     ; <<< RENAMED Unknown type, just return
+            ; No recognized wave type or ADC active, just return
+            lbra   oc5_done_minimal
 
             ; Handle ADC sampling
 oc5_handleADC:
-            ; The first conversion should be complete before we enter this routine
-            ; Read the previous conversion result (which should be ready)
-            ldaa  ATDDR0L              ; Get the 8-bit ADC result
-            staa  ADC_RESULT           ; Store it for use in main loop
-            staa  waveDataVal          ; Store in waveDataVal to use existing output routine
+            ; Read the previous conversion result
+            ; This should be ready since we waited for the first one
+            ; and each interrupt gives enough time for conversion
+            ldaa  ATDDR0L       ; Get the 8-bit ADC result
+            staa  ADC_RESULT    ; Store it for reference in main loop
+            staa  waveDataVal   ; Store in waveDataVal to use existing output
             ldaa  #1                   
-            staa  waveDataReady        ; Set flag to print in main loop
+            staa  waveDataReady ; Set flag to print in main loop
             
-            ; Start next conversion
-            ldaa  #%10000111           ; Right justified, unsigned, single conversion, channel 7
-            staa  ATDCTL5              ; Start next conversion
+            ; Start next conversion immediately
+            ; This gives it maximum time to complete before next interrupt
+            ldaa  #%10000111    ; Right justified, unsigned, single conversion, channel 7
+            staa  ATDCTL5       ; Start next conversion
             
-            ; Increment ADC counter and check if finished (1000 samples - reduced from 2048)
+            ; Increment ADC counter and check if finished (2048 samples)
             ldd   ADC_COUNTER
-            addd  #1                   ; Increment counter
+            addd  #1            ; Increment counter
             std   ADC_COUNTER
-            cpd   #2048                ; Use full 2048 samples for better accuracy
-            lbhs  oc5_finishADC        ; If >= 2048, go to completion routine
+            cpd   #2048         ; Full 2048 samples for better accuracy
+            lbhs  oc5_finishADC ; If >= 2048, go to completion routine
             
             ; Not finished yet, continue to next interrupt cycle
-            lbra  oc5_done_minimal     ; Return from ISR
+            lbra  oc5_done_minimal
 
 oc5_finishADC:
-            ; If we've reached 1000 samples, finish ADC sampling
-            clr   ADC_ACTIVE           ; Clear ADC active flag
+            ; We've completed all 2048 samples!
+            ; Need to clean up and notify main loop
+            clr   ADC_ACTIVE    ; Clear ADC active flag
             ldaa  #1
-            staa  ADC_FINISHED         ; Set ADC finished flag
-            staa  waveCompleteFlag     ; Set completion flag
-            ldaa  #%11011111           ; Mask to disable ONLY TC5 interrupt (bit 5)
-            anda  TIE                  ; Read current TIE
-            staa  TIE                  ; Write back with TC5 bit cleared
+            staa  ADC_FINISHED  ; Set ADC finished flag
+            staa  waveCompleteFlag ; Set completion flag
+            ldaa  #%11011111    ; Mask to disable ONLY TC5 interrupt (bit 5)
+                                ; Reading TIE, clearing bit 5, writing back
+            anda  TIE           ; AND with current TIE value
+            staa  TIE           ; Write back with TC5 bit cleared
             
-            ; Set display flag to force main loop update (important!)
+            ; Set display flag to force main loop update
+            ; This ensures the terminal shows the completion message
             ldaa  #1
-            staa  dispFlag             ; Force main loop to display feedback
+            staa  dispFlag      ; Force main loop to display feedback
             
-            lbra  oc5_done_minimal     ; Return from ISR
+            lbra  oc5_done_minimal ; Return from ISR
 
             ; 4a. Not finished (Standard Sawtooth): Store lower byte and set ready flag
 oc5_setDataFlag:                     ; <<< RENAMED
